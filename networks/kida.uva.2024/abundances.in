@@ -1,0 +1,16 @@
+# Initial abundances relative to total H nuclei.
+# e- is not listed here — it is computed from charge neutrality in code.
+H2    0.5
+He    0.09
+N     6.2e-5
+O     2.4e-4
+F     6.7e-9
+C+    1.7e-4
+S+    8.0e-8
+Si+   8.0e-9
+Fe+   3.0e-9
+Na+   2.0e-9
+Mg+   7.0e-9
+Cl+   1.0e-9
+P+    2.0e-10
+GRAIN0 1.8e-12

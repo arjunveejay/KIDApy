@@ -1,0 +1,6 @@
+*.pyc
+*.npy
+*.csv
+*comparison.txt
+
+__pycache__

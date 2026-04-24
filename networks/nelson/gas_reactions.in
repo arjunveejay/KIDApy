@@ -1,0 +1,38 @@
+! Nelson & Langer (1999, ApJ 524, 923) simplified C–O network in KIDA-style format
+! only columns starting with "*" are used by the code
+!   *Reactants  *Products     *alpha     *beta      *gamma     F        g      err *itype Tmin  Tmax *frml  *ID ni r 
+
+! Cosmic-ray ionization (H2 CR rate taken to be 1.0; k_H2 = zeta_cr)
+H2         CR                     H3+        e-         H                                            1.000e+00       0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  1  -9999   9999  1     1 1  1
+He         CR                     He+        e-                                                      5.667e-01       0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  1  -9999   9999  1     2 1  1
+
+! Ion–molecule reactions (two-body, constant rates; k = alpha)
+H3+        C                      CHx        H2                                                     2.000e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     3 1  1
+H3+        O                      OHx        H2                                                     8.000e-10  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     4 1  1
+H3+        CO                     HCO+       H2                                                     1.700e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     5 1  1
+He+        H2                     He         H2+                                                    7.000e-15  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     6 1  1
+He+        CO                     C+         O          He                                          1.600e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     7 1  1
+C+         H2                     CHx        H                                                      4.000e-16  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     8 1  1
+C+         OHx                    HCO+                                                              1.000e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     9 1  1
+
+! Neutral–neutral
+O          CHx                    CO         H                                                     2.000e-10  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3    10 1  1
+C          OHx                    CO         H                                                     1.004e-10  5.000e-01  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3    11 1  1
+
+! Electron recombination 
+He+        e-                     He                                                               2.338e-12 -6.400e-01  0.000e+00 2.00e+00 0.00e+00 logn  8  -9999   9999  3    12 1  1
+H3+        e-                     H          H2                                                    8.732e-08 -5.400e-01  0.000e+00 2.00e+00 0.00e+00 logn  8  -9999   9999  3    13 1  1
+C+         e-                     C                                                                4.316e-12 -6.100e-01  0.000e+00 2.00e+00 0.00e+00 logn  8  -9999   9999  3    14 1  1
+HCO+       e-                     CO         H                                                     1.100e-07 -1.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  8  -9999   9999  3    15 1  1
+M+         e-                     M                                                                9.325e-12 -6.500e-01  0.000e+00 2.00e+00 0.00e+00 logn  8  -9999   9999  3    16 1  1
+
+! Charge-transfer (constant rate)
+H3+        M                      M+         e-         H2                                         2.000e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  5  -9999   9999  3    17 1  1
+
+! Photoreactions (FUV, k = alpha * uv_flux * exp(-gamma * Av); Photon never in first column)
+C          Photon                 C+         e-                                                    3.000e-10  0.000e+00  3.000e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    18 1  1
+CHx        Photon                 C          H                                                     1.000e-09  0.000e+00  1.500e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    19 1  1
+CO         Photon                 C          O                                                     1.000e-10  0.000e+00  3.000e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    20 1  1
+OHx        Photon                 O          H                                                     5.000e-10  0.000e+00  1.700e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    21 1  1
+M          Photon                 M+         e-                                                    2.000e-10  0.000e+00  1.900e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    22 1  1
+HCO+       Photon                 CO         H                                                     1.500e-10  0.000e+00  2.500e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    23 1  1
