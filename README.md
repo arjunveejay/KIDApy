@@ -97,7 +97,7 @@ Reactions that list multiple $[T_{\min}, T_{\max}]$ ranges are resolved at load 
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `grain_gas_ratio` | $1.8 \times 10^{-12}$ | Grain-to-gas number density ratio ($n_\mathrm{grain} = \texttt{grain\_gas\_ratio} \times n_\mathrm{H}$) |
+| `grain_gas_ratio` | $1.8 \times 10^{-12}$ | Grain-to-gas number density  |
 | `zeta_cr` | $1.3 \times 10^{-17}\ \mathrm{s}^{-1}$ | Cosmic-ray ionisation rate |
 
 Both are module-level variables and can be overridden before calling `get_operators` if a different value is required.
