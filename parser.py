@@ -277,6 +277,107 @@ class Network:
         B = _build(B_rows, B_cols, B_data, (N, N * N))
         return A, B
 
+    def get_A_structure(self):
+        """
+        Return the fixed COO index arrays ``(ai, aj)`` of the A matrix.
+
+        The sparsity pattern is a property of the reaction graph alone: it is
+        fixed by the 1-body reactions in the network (a loss on the reactant's
+        diagonal, and a gain in the reactant's column for each product) and is
+        independent of the environment (T, nH, Av, ...).  Rate *values* change
+        with the environment; these *positions* do not.  No rate coefficients
+        are evaluated here.
+
+        The returned arrays span every 1-body reaction, so they are a superset
+        of the nonzeros that ``get_operators`` produces in any single
+        environment (where zero-rate reactions are dropped).
+
+        Returns
+        -------
+        ai : np.ndarray of int64, shape (nnz,)
+            Row indices (species receiving a net linear contribution).
+        aj : np.ndarray of int64, shape (nnz,)
+            Column indices (reactant species), with ``A[ai[n], aj[n]]`` the
+            n-th nonzero entry after duplicate summation.
+        """
+        N = len(self.species)
+        rows, cols = [], []
+        for rxn in self.reactions:
+            r_idxs = [self.species_map[r] for r in rxn["reactants"]
+                      if r in self.species_map]
+            p_idxs = [self.species_map[p] for p in rxn["products"]
+                      if p in self.species_map]
+            if len(r_idxs) != 1:
+                continue
+            r1 = r_idxs[0]
+            for row in [r1] + p_idxs:
+                rows.append(row)
+                cols.append(r1)
+
+        if not rows:
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty
+
+        dummy = sp.coo_matrix(
+            (np.ones(len(rows), dtype=np.float64), (rows, cols)),
+            shape=(N, N),
+        )
+        dummy.sum_duplicates()
+        ai = dummy.row.astype(np.int64, copy=False)
+        aj = dummy.col.astype(np.int64, copy=False)
+        return ai, aj
+
+    def get_B_structure(self):
+        """
+        Return the fixed COO index arrays ``(bi, bj, bk)`` of the B tensor.
+
+        Like :meth:`get_A_structure`, the pattern is purely topological: it is
+        fixed by which species appear as the two reactants / products of each
+        2-body reaction, and is independent of the environment.  No rate
+        coefficients are evaluated here.
+
+        Reactions sharing a reactant pair collapse onto the same B column and
+        duplicate ``(row, col)`` entries are coalesced, so the returned arrays
+        match the nonzero layout ``get_operators`` would produce if every
+        2-body reaction had a nonzero rate (a superset of any single
+        environment).
+
+        Returns
+        -------
+        bi : np.ndarray of int64, shape (nnz,)
+            Row indices (species receiving a net quadratic contribution).
+        bj, bk : np.ndarray of int64, shape (nnz,)
+            Reactant-pair indices, with ``B[bi[n], bj[n]*N + bk[n]]`` the n-th
+            nonzero entry after duplicate summation.
+        """
+        N = len(self.species)
+        rows, cols = [], []
+        for rxn in self.reactions:
+            r_idxs = [self.species_map[r] for r in rxn["reactants"]
+                      if r in self.species_map]
+            p_idxs = [self.species_map[p] for p in rxn["products"]
+                      if p in self.species_map]
+            if len(r_idxs) != 2:
+                continue
+            r1, r2 = r_idxs
+            col = r1 * N + r2
+            for row in [r1, r2] + p_idxs:
+                rows.append(row)
+                cols.append(col)
+
+        if not rows:
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty, empty
+
+        dummy = sp.coo_matrix(
+            (np.ones(len(rows), dtype=np.float64), (rows, cols)),
+            shape=(N, N * N),
+        )
+        dummy.sum_duplicates()
+        bi = dummy.row.astype(np.int64, copy=False)
+        flat_col = dummy.col.astype(np.int64, copy=False)
+        return bi, flat_col // N, flat_col % N
+
     def get_passive_species(self) -> list:
         """
         Return species that never appear as a reactant (pure-sink species).

@@ -587,6 +587,13 @@ class QuadraticSolverTracer:
             if verbose:
                 print(f"{interpolation} segment {i + 1}/{M - 1}: nfev={sol.nfev}  njev={sol.njev}  nout={sol.t.size}")
 
+        if t_eval_arr is not None:
+            # An explicit grid is partitioned across segments by the half-open
+            # filter [knot_i, knot_{i+1}); the points are disjoint, so the
+            # concatenation reproduces the requested grid with nothing to drop.
+            return np.concatenate(all_t), np.hstack(all_y)
+        # Adaptive output: consecutive segments both include the shared knot
+        # time, so drop the duplicate at each boundary.
         t_out = [all_t[0]]
         y_out = [all_y[0]]
         for i in range(1, len(all_t)):

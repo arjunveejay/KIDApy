@@ -4,3 +4,7 @@
 *comparison.txt
 
 __pycache__
+solver2.py
+solver3.py
+.gitignore
+parser2.py
