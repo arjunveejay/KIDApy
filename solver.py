@@ -30,6 +30,153 @@ from scipy.interpolate import CubicSpline, PchipInterpolator
 from typing import Tuple
 
 
+def _make_jac(Acsr, B, N):
+    """
+    Build a ``jac(t, x)`` callable for J = A + B(x, ·) + B(·, x) whose sparsity
+    structure is computed **once**.
+
+    The nonzero layout of J (the union of A's pattern and the quadratic
+    derivative pattern) does not change during a solve — only the values do.
+    This precomputes the CSR ``indptr``/``indices`` and a map from each
+    contribution to its data slot, so every call only refills the value array
+    with a single ``np.bincount`` instead of re-running ``sum_duplicates`` and a
+    sparse ``A + Jq`` addition.
+
+    Parameters
+    ----------
+    Acsr : scipy.sparse matrix, shape (N, N)
+        Linear operator (fixed for the solve).
+    B : scipy.sparse matrix, shape (N, N*N)
+        Quadratic operator (fixed for the solve).
+    N : int
+
+    Returns
+    -------
+    jac : callable ``(t, x) -> scipy.sparse.csr_matrix``
+    """
+    Acsr = Acsr.tocsr(copy=False)
+
+    if B.nnz == 0:
+        # J is constant (= A); return the same prebuilt matrix every call.
+        def jac(_t, _x):
+            return Acsr
+        return jac
+
+    Acoo = Acsr.tocoo(copy=False)
+    a_rows = Acoo.row.astype(np.int64, copy=False)
+    a_cols = Acoo.col.astype(np.int64, copy=False)
+    a_vals = np.asarray(Acoo.data, dtype=np.float64)
+
+    Bcoo = B.tocoo(copy=False)
+    bi = Bcoo.row.astype(np.int64, copy=False)
+    bj = (Bcoo.col // N).astype(np.int64, copy=False)
+    bk = (Bcoo.col  % N).astype(np.int64, copy=False)
+    bv = np.asarray(Bcoo.data, dtype=np.float64)
+
+    # Assembly order: constant A part first, then the two quadratic halves
+    #   d/dx_j [B_ijk x_j x_k] -> J[i,j] += B x_k ;  J[i,k] += B x_j
+    all_rows = np.concatenate([a_rows, bi, bi])
+    all_cols = np.concatenate([a_cols, bj, bk])
+
+    # Canonical (row-major, per-row-sorted) union structure — computed once.
+    lin = all_rows * N + all_cols
+    uniq, inverse = np.unique(lin, return_inverse=True)
+    indices = (uniq %  N).astype(np.int32)
+    indptr = np.concatenate(
+        ([0], np.cumsum(np.bincount(uniq // N, minlength=N)))
+    ).astype(np.int32)
+    ndata = uniq.size
+    n_a = a_vals.size
+    m = bv.size
+
+    def jac(_t, x):
+        contribs = np.empty(all_rows.size, dtype=np.float64)
+        contribs[:n_a] = a_vals
+        contribs[n_a:n_a + m] = bv * x[bk]
+        contribs[n_a + m:]    = bv * x[bj]
+        data = np.bincount(inverse, weights=contribs, minlength=ndata)
+        return sp.csr_matrix((data, indices, indptr), shape=(N, N))
+
+    return jac
+
+
+class _TracerJacobian:
+    """
+    Reusable Jacobian assembler for a *time-dependent* quadratic system whose
+    sparsity pattern is fixed by the reaction network, not by the environment.
+
+    Built once from the topology index arrays returned by
+    ``Network.get_A_structure()`` and ``Network.get_B_structure()`` (an
+    environment-independent superset of every ``get_tensors`` output).  Each ODE
+    step calls :meth:`assemble` with the current ``A_t``, ``B_t`` — whatever
+    subset of the fixed pattern the parser emits — and the state ``x``; their
+    values are scattered onto the precomputed union structure and
+    ``J = A + B(x, ·) + B(·, x)`` is returned.
+
+    The union CSR layout (``indptr``/``indices``), the contribution→slot map,
+    and the scatter maps are all computed once, so the per-step cost is O(nnz):
+    no ``sum_duplicates`` and no sparse ``A + Jq`` addition per call.
+    """
+
+    def __init__(self, ai, aj, bi, bj, bk, N):
+        self.N = int(N)
+        ai = np.ascontiguousarray(ai, dtype=np.int64)
+        aj = np.ascontiguousarray(aj, dtype=np.int64)
+        bi = np.ascontiguousarray(bi, dtype=np.int64)
+        bj = np.ascontiguousarray(bj, dtype=np.int64)
+        bk = np.ascontiguousarray(bk, dtype=np.int64)
+        self.bj, self.bk = bj, bk
+        self.n_a = ai.size
+        self.m = bi.size
+
+        # Sorted flat keys, used to scatter a variable-pattern A_t / B_t onto
+        # the fixed value arrays via searchsorted.
+        NN = self.N * self.N
+        a_keys = ai * self.N + aj                 # A is (N, N)
+        b_keys = bi * NN + (bj * self.N + bk)     # B is (N, N*N)
+        self._a_sorter = np.argsort(a_keys, kind="stable")
+        self._b_sorter = np.argsort(b_keys, kind="stable")
+        self._a_keys_sorted = a_keys[self._a_sorter]
+        self._b_keys_sorted = b_keys[self._b_sorter]
+
+        # Union structure of J: A positions + quadratic-derivative positions
+        #   d/dx_j [B_ijk x_j x_k] -> J[i,j] += B x_k ;  J[i,k] += B x_j
+        j_rows = np.concatenate([ai, bi, bi])
+        j_cols = np.concatenate([aj, bj, bk])
+        lin = j_rows * self.N + j_cols
+        uniq, inverse = np.unique(lin, return_inverse=True)
+        self._indices = (uniq % self.N).astype(np.int32)
+        self._indptr = np.concatenate(
+            ([0], np.cumsum(np.bincount(uniq // self.N, minlength=self.N)))
+        ).astype(np.int32)
+        self._inverse = inverse
+        self._ndata = uniq.size
+
+    def _scatter(self, mat, keys_sorted, sorter, keyscale, size):
+        co = mat.tocoo(copy=False)
+        vals = np.zeros(size, dtype=np.float64)
+        if co.nnz == 0:
+            return vals
+        keys = co.row.astype(np.int64) * keyscale + co.col.astype(np.int64)
+        pos = np.searchsorted(keys_sorted, keys)
+        posc = np.minimum(pos, keys_sorted.size - 1)
+        if not np.array_equal(keys_sorted[posc], keys):
+            raise ValueError("tensor has a nonzero outside the fixed sparsity topology")
+        vals[sorter[pos]] = co.data
+        return vals
+
+    def assemble(self, A_t, B_t, x):
+        N = self.N
+        a_vals = self._scatter(A_t, self._a_keys_sorted, self._a_sorter, N, self.n_a)
+        bv = self._scatter(B_t, self._b_keys_sorted, self._b_sorter, N * N, self.m)
+        contribs = np.empty(self.n_a + 2 * self.m, dtype=np.float64)
+        contribs[:self.n_a] = a_vals
+        contribs[self.n_a:self.n_a + self.m] = bv * x[self.bk]
+        contribs[self.n_a + self.m:] = bv * x[self.bj]
+        data = np.bincount(self._inverse, weights=contribs, minlength=self._ndata)
+        return sp.csr_matrix((data, self._indices, self._indptr), shape=(N, N))
+
+
 class QuadraticSolver:
     """
     Solver for the quadratic ODE dx/dt = A x + B(x, x).
@@ -182,25 +329,11 @@ class QuadraticSolver:
                     (Bcoo.data * s[bj] * s[bk] * s_inv[bi], (Bcoo.row, Bcoo.col)),
                     shape=B.shape, dtype=np.float64,
                 ).tocsr()
-
-                Bcoo_sc = B_sc.tocoo(copy=False)
-                bi_sc = Bcoo_sc.row.astype(np.int64, copy=False)
-                bj_sc = (Bcoo_sc.col // N).astype(np.int64, copy=False)
-                bk_sc = (Bcoo_sc.col  % N).astype(np.int64, copy=False)
-                bv_sc = np.asarray(Bcoo_sc.data, dtype=np.float64)
-                jrows = np.concatenate([bi_sc, bi_sc])
-                jcols = np.concatenate([bj_sc, bk_sc])
-
-                def jac(_t, z):
-                    data = np.concatenate([bv_sc * z[bk_sc], bv_sc * z[bj_sc]])
-                    Jq = sp.coo_matrix((data, (jrows, jcols)), shape=(N, N), dtype=np.float64)
-                    Jq.sum_duplicates()
-                    return (A_sc + Jq.tocsr()).tocsr()
             else:
                 B_sc = B
 
-                def jac(_t, _z):
-                    return A_sc
+            # structure built once; each jac call only refills values
+            jac = _make_jac(A_sc, B_sc, N)
 
             def f(_t, z):
                 return self.compute_rhs(z, A_sc, B_sc)
@@ -212,23 +345,8 @@ class QuadraticSolver:
             raise RuntimeError(f"Solver failed (status={sol.status}): {sol.message}")
 
         # --- unscaled ---
-        if B.nnz > 0:
-            Bcoo = B.tocoo(copy=False)
-            bi   = Bcoo.row.astype(np.int64, copy=False)
-            bj   = (Bcoo.col // N).astype(np.int64, copy=False)
-            bk   = (Bcoo.col  % N).astype(np.int64, copy=False)
-            bv   = np.asarray(Bcoo.data, dtype=np.float64)
-            jrows = np.concatenate([bi, bi])
-            jcols = np.concatenate([bj, bk])
-
-            def jac(t, x):
-                data = np.concatenate([bv * x[bk], bv * x[bj]])
-                Jq = sp.coo_matrix((data, (jrows, jcols)), shape=(N, N), dtype=np.float64)
-                Jq.sum_duplicates()
-                return (Acsr + Jq.tocsr()).tocsr()
-        else:
-            def jac(t, x):
-                return Acsr
+        # structure built once; each jac call only refills values
+        jac = _make_jac(Acsr, B, N)
 
         def f(t, x):
             return self.compute_rhs(x, A, B)
@@ -384,6 +502,7 @@ class QuadraticSolverTracer:
         verbose: bool = False,
         log_cols=None,
         t_eval=None,
+        jac_structure=None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Integrate the time-dependent system
@@ -421,6 +540,15 @@ class QuadraticSolverTracer:
             Columns to interpolate in log space for spline or PCHIP modes.
         t_eval : array-like or None, optional
             Optional output time grid over the full trajectory.
+        jac_structure : tuple or None, optional
+            Fixed Jacobian sparsity topology as
+            ``(ai, aj, bi, bj, bk)`` from ``Network.get_A_structure()`` and
+            ``Network.get_B_structure()``.  When provided (spline/PCHIP modes
+            only), the Jacobian structure is built once and only its values are
+            refilled per step, instead of reassembling it on every call.  The
+            pattern must be an environment-independent superset of every
+            ``get_tensors`` output.  ``None`` (default) uses the per-call
+            :meth:`QuadraticSolver.compute_jacobian`.
 
         Returns
         -------
@@ -501,6 +629,14 @@ class QuadraticSolverTracer:
             cache[0] = t_c
             return cache[1], cache[2]
 
+        # Optional fast path: build the Jacobian sparsity structure ONCE from
+        # the network topology and refill values per step. Diagonal scaling
+        # preserves the pattern, so the same assembler serves the scaled path.
+        tracer_jac = None
+        if jac_structure is not None:
+            ai, aj, bi, bj, bk = jac_structure
+            tracer_jac = _TracerJacobian(ai, aj, bi, bj, bk, N)
+
         t_eval_arr = np.asarray(t_eval, dtype=np.float64) if t_eval is not None else None
         all_t, all_y = [], []
 
@@ -537,7 +673,10 @@ class QuadraticSolverTracer:
                     return q.compute_rhs(z, *_scale_AB(*_AB(t)))
 
                 def jac(t, z, _scale_AB=_scale_AB):
-                    return q.compute_jacobian(z, *_scale_AB(*_AB(t)))
+                    A_sc, B_sc = _scale_AB(*_AB(t))
+                    if tracer_jac is not None:
+                        return tracer_jac.assemble(A_sc, B_sc, z)
+                    return q.compute_jacobian(z, A_sc, B_sc)
 
                 z0 = x0 * s_inv
                 sol = solve_ivp(
@@ -562,6 +701,8 @@ class QuadraticSolverTracer:
 
                 def jac(t, x):
                     A_t, B_t = _AB(t)
+                    if tracer_jac is not None:
+                        return tracer_jac.assemble(A_t, B_t, x)
                     return q.compute_jacobian(x, A_t, B_t)
 
                 sol = solve_ivp(

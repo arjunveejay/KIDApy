@@ -277,6 +277,129 @@ class Network:
         B = _build(B_rows, B_cols, B_data, (N, N * N))
         return A, B
 
+    def get_operators_vectorized(self, env: dict):
+        """
+        Vectorized :meth:`get_operators`: identical ``A``, ``B`` (to roundoff),
+        ~40x faster for repeated calls. Structure is cached on first use.
+
+        Parameters
+        ----------
+        env : dict
+            Required keys: T, nH, Av, uv_flux. Optional: Tcap_2body (default True).
+
+        Returns
+        -------
+        A : scipy.sparse.csr_matrix, shape (N, N)
+        B : scipy.sparse.csr_matrix, shape (N, N*N)
+        """
+        N = len(self.species)
+
+        # ---- Build environment-independent structure once, then cache it. ----
+        # Only rate values depend on the environment; the sparsity pattern,
+        # contribution map and multi-range groups do not.
+        if getattr(self, "_fast_N", None) != N:
+            supported = {0, 1, 2, 3, 4, 5, 10, 11}   # formula types handled here
+            two_body = (4, 5, 6, 7, 8, 11)            # itypes whose rate absorbs nH
+            rx, sm = self.reactions, self.species_map
+            col = lambda key: np.array([r[key] for r in rx], dtype=np.float64)
+            self._fr = np.array([r["frml"] for r in rx])
+            self._it = np.array([r["itype"] for r in rx])
+            if {int(f) for f in np.unique(self._fr)} - supported:
+                raise ValueError("get_operators_vectorized: unsupported formula type present")
+            self._al, self._be, self._ga = col("alpha"), col("beta"), col("gamma")
+            self._tn, self._tx = col("tmin"), col("tmax")
+            self._norange = (self._tn <= -9000) & (self._tx >= 9000)
+            self._twobody = np.isin(self._it, two_body) & np.isin(self._fr, [3, 4, 5])
+
+            def coalesce(contribs, ncol):  # (row, col, sign, reaction) -> fixed CSR + scatter map
+                if not contribs:
+                    z = np.empty(0)
+                    return dict(idx=np.empty(0, np.int32), ptr=np.zeros(N + 1, np.int32),
+                                inv=z.astype(int), nd=0, sign=z, rxn=z.astype(int), ncol=ncol)
+                row, c, sign, rxn = (np.array(x) for x in zip(*contribs))
+                u, inv = np.unique(row.astype(int) * ncol + c.astype(int), return_inverse=True)
+                ptr = np.r_[0, np.cumsum(np.bincount(u // ncol, minlength=N))].astype(np.int32)
+                return dict(idx=(u % ncol).astype(np.int32), ptr=ptr, inv=inv, nd=u.size,
+                            sign=sign.astype(float), rxn=rxn.astype(int), ncol=ncol)
+
+            # Enumerate (row, col, sign, reaction) contributions once:
+            #   1-body -> A: loss on the reactant diagonal, gain for each product
+            #   2-body -> B (column r1*N+r2): loss for both reactants, gain per product
+            A, B, high = [], [], False
+            for i, r in enumerate(rx):
+                ri = [sm[s] for s in r["reactants"] if s in sm]
+                pi = [sm[s] for s in r["products"] if s in sm]
+                if len(ri) == 1:
+                    A += [(ri[0], ri[0], -1.0, i)] + [(p, ri[0], 1.0, i) for p in pi]
+                elif len(ri) == 2:
+                    c = ri[0] * N + ri[1]
+                    B += [(ri[0], c, -1.0, i), (ri[1], c, -1.0, i)] + [(p, c, 1.0, i) for p in pi]
+                elif len(ri) >= 3:
+                    high = True
+            if high:
+                warnings.warn("Reactions with >2 active reactants detected and skipped "
+                              "(no third-order tensor is built).", RuntimeWarning, stacklevel=2)
+            self._Astruct, self._Bstruct = coalesce(A, N), coalesce(B, N * N)
+
+            # Group reactions differing only by temperature range; the per-call
+            # selection (below) keeps the single entry valid at T.
+            grp = defaultdict(list)
+            for i, r in enumerate(rx):
+                grp[(tuple(r["reactants"]), tuple(r["products"]), r["itype"])].append(i)
+            g = [m for m in grp.values() if len(m) > 1]
+            self._mm = np.array([i for m in g for i in m], dtype=int)
+            self._gid = np.array([j for j, m in enumerate(g) for _ in m], dtype=int)
+            self._loc = np.array([k for m in g for k in range(len(m))], dtype=float)
+            self._fast_N = N
+
+        # ---- Per call: rate coefficient for every reaction, vectorized. ----
+        T, nH, Av = float(env["T"]), float(env["nH"]), float(env["Av"])
+        uv, Tcap = float(env["uv_flux"]), bool(env.get("Tcap_2body", True))
+        a, b, g, fr, it = self._al, self._be, self._ga, self._fr, self._it
+        # Teff optionally clamped to each reaction's [tmin, tmax] (no clamp for -9999/9999)
+        Teff = np.where(self._norange, T, np.clip(T, self._tn, self._tx)) if Tcap else np.full(a.shape, T)
+        p = Teff > 0
+        k = np.zeros(a.shape)
+        m = fr == 1                          # cosmic-ray ionisation
+        k[m] = a[m] * zeta_cr
+        m = fr == 2                          # UV photodissociation
+        k[m] = a[m] * uv * np.exp(-g[m] * Av)
+        m = (fr == 3) & p                    # Kooij
+        k[m] = a[m] * (Teff[m] / 300.0) ** b[m] * np.exp(-g[m] / Teff[m])
+        m = (fr == 4) & p                    # ionpol1
+        k[m] = a[m] * b[m] * (0.62 + 0.4767 * g[m] * np.sqrt(300.0 / Teff[m]))
+        m = (fr == 5) & p                    # ionpol2
+        s = np.sqrt(300.0 / Teff[m])
+        k[m] = a[m] * b[m] * (1.0 + 0.0967 * g[m] * s + 28.501 * g[m] ** 2 / Teff[m])
+        k[self._twobody] *= nH               # 2-body reactions absorb nH
+        if self.grains:
+            gd = grain_gas_ratio * nH
+            m = (fr == 0) & (it == 0) & p    # ion-grain recombination
+            k[m] = a[m] * (Teff[m] / 300.0) ** b[m] * nH
+            m = (fr == 10) & p               # XH + XH -> H2 + H
+            k[m] = 8.64e6 * np.exp(-225.0 / Teff[m]) / gd * nH
+            m = (fr == 11) & p               # H -> XH
+            k[m] = a[m] * (Teff[m] / 300.0) ** b[m] * gd
+        # Zero every multi-range entry except the one selected at T: order each
+        # group (in-range first, then by position; otherwise by nearest
+        # boundary) and keep the first member per group.
+        if self._mm.size:
+            tn, tx = self._tn[self._mm], self._tx[self._mm]
+            ir = (tn <= T) & (T <= tx)
+            o = np.lexsort((np.where(ir, self._loc, np.minimum(abs(T - tn), abs(T - tx))),
+                            np.where(ir, 0, 1), self._gid))
+            gs = self._gid[o]
+            act = np.ones(fr.shape, dtype=bool)
+            act[self._mm] = False
+            act[self._mm[o[np.r_[True, gs[1:] != gs[:-1]]]]] = True
+            k = k * act
+        # Scatter signed rate contributions into the cached CSR pattern,
+        # summing per (row, col) slot with bincount.
+        mk = lambda S: sp.csr_matrix(
+            (np.bincount(S["inv"], weights=k[S["rxn"]] * S["sign"], minlength=S["nd"]),
+             S["idx"], S["ptr"]), shape=(N, S["ncol"]))
+        return mk(self._Astruct), mk(self._Bstruct)
+
     def get_A_structure(self):
         """
         Return the fixed COO index arrays ``(ai, aj)`` of the A matrix.
