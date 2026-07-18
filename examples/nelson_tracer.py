@@ -180,12 +180,15 @@ plt.close(fig)
 tracer = QuadraticSolverTracer()
 tracer_plot_data = {}
 
+# Fixed Jacobian sparsity topology (enables the tracer's fast Jacobian path)
+jac_structure = (*net.get_A_structure(), *net.get_B_structure())
+
 print("\nRunning tracer solves...")
 for mode in ("piecewise_constant", "cubic_spline", "pchip"):
     out_t, out_y = tracer.solve(
         dt_hydro=dt_hydro,
         pt=pt,
-        get_tensors=net.get_operators,
+        get_tensors=net.get_operators_vectorized,
         x0=x0,
         atol=ATOL,
         rtol=RTOL,
@@ -193,6 +196,7 @@ for mode in ("piecewise_constant", "cubic_spline", "pchip"):
         interpolation=mode,
         use_scaling=True,
         log_cols=LOG_COLS,
+        jac_structure=jac_structure,
     )
 
     tracer_root = SAVE_DIR / f"nelson_tracer_{mode}"

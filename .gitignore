@@ -4,8 +4,4 @@
 *comparison.txt
 
 __pycache__
-solver2.py
-solver3.py
-.gitignore
-parser2.py
-examples/data/kida_uva_2024_point/kida_uva_2024_point.pdf
+examples/data/*

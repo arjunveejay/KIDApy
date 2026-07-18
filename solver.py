@@ -23,11 +23,35 @@ QuadraticSolverTracer
 __all__ = ["QuadraticSolver", "QuadraticSolverTracer"]
 
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import scipy.sparse as sp
 from scipy.integrate import solve_ivp
 from scipy.interpolate import CubicSpline, PchipInterpolator
 from typing import Tuple
+
+
+# Module-level worker for QuadraticSolverTracer.solve_multiple. get_tensors and
+# the shared solve config are passed once per process via the pool initializer
+# (not re-pickled per task); each task carries only its trajectory and x0.
+_MT_get_tensors = None
+_MT_config = None
+
+
+def _tracer_mt_init(get_tensors, config):
+    global _MT_get_tensors, _MT_config
+    _MT_get_tensors, _MT_config = get_tensors, config
+
+
+def _tracer_mt_worker(task):
+    i, pt, x0 = task
+    c = _MT_config
+    out = QuadraticSolverTracer().solve(
+        dt_hydro=c["dt_hydro"], pt=pt, get_tensors=_MT_get_tensors, x0=x0,
+        atol=c["atol"], rtol=c["rtol"], min_scale=c["min_scale"], method=c["method"],
+        interpolation=c["interpolation"], use_scaling=c["use_scaling"], verbose=False,
+        log_cols=c["log_cols"], t_eval=c["t_eval"], jac_structure=c["jac_structure"])
+    return i, out
 
 
 def _make_jac(Acsr, B, N):
@@ -741,6 +765,118 @@ class QuadraticSolverTracer:
             t_out.append(all_t[i][1:])
             y_out.append(all_y[i][:, 1:])
         return np.concatenate(t_out), np.hstack(y_out)
+
+    @staticmethod
+    def _expand_initial_states(x0, n):
+        """One initial-abundance vector per tracer (a single vector is reused)."""
+        x0 = np.asarray(x0, dtype=np.float64)
+        if x0.ndim == 1:
+            return [x0.copy() for _ in range(n)]
+        if x0.ndim == 2:
+            if x0.shape[0] == n:
+                return [x0[i].copy() for i in range(n)]
+            if x0.shape[1] == n:
+                return [x0[:, i].copy() for i in range(n)]
+        raise ValueError(f"x0 must be one state vector or one per tracer; got {x0.shape} for {n}")
+
+    def solve_multiple(
+        self,
+        dt_hydro: float,
+        tracers,
+        get_tensors,
+        x0: np.ndarray,
+        atol: float,
+        rtol: float,
+        min_scale: float,
+        method: str = "BDF",
+        interpolation: str = "piecewise_constant",
+        use_scaling: bool = False,
+        log_cols=None,
+        t_eval=None,
+        jac_structure=None,
+        n_workers: int = 1,
+        verbose: bool = False,
+        return_failures: bool = False,
+    ):
+        """
+        Solve many independent tracer trajectories in parallel.
+
+        Each tracer is integrated with :meth:`solve`; parallelism is across
+        trajectories (each trajectory's hydro steps remain sequential) using a
+        process pool. All solve arguments are shared across trajectories.
+
+        Parameters
+        ----------
+        tracers : sequence of np.ndarray
+            One physical trajectory ``pt`` (shape (M, 5)) per solve.
+        x0 : np.ndarray
+            Either one state vector (shape (N,), reused for every tracer) or one
+            per tracer (shape (n_tracers, N) or (N, n_tracers)).
+        n_workers : int
+            Number of worker processes. ``1`` runs serially.
+        return_failures : bool
+            If ``True``, failed trajectories are stored as ``None`` and returned
+            as ``(results, failures)`` with ``failures`` a list of ``(index,
+            exception)``; otherwise the first failure is raised.
+        Other parameters are passed through to :meth:`solve`.
+
+        Returns
+        -------
+        results : list
+            ``(t, y)`` per tracer, in input order (``None`` for failures when
+            ``return_failures=True``).
+        failures : list, optional
+            Returned only when ``return_failures=True``.
+        """
+        tracers = list(tracers)
+        n = len(tracers)
+        x0_list = self._expand_initial_states(x0, n)
+        results = [None] * n
+        failures = []
+
+        kw = dict(dt_hydro=dt_hydro, get_tensors=get_tensors, atol=atol, rtol=rtol,
+                  min_scale=min_scale, method=method, interpolation=interpolation,
+                  use_scaling=use_scaling, log_cols=log_cols, t_eval=t_eval,
+                  jac_structure=jac_structure)
+
+        if int(n_workers) <= 1 or n <= 1:
+            for i in range(n):
+                try:
+                    results[i] = self.solve(pt=tracers[i], x0=x0_list[i], verbose=False, **kw)
+                except Exception as exc:
+                    if not return_failures:
+                        raise
+                    failures.append((i, exc))
+                    if verbose:
+                        print(f"[WARN] tracer {i} failed: {exc}")
+            return (results, failures) if return_failures else results
+
+        config = {k: kw[k] for k in kw if k != "get_tensors"}
+        with ProcessPoolExecutor(max_workers=int(n_workers),
+                                 initializer=_tracer_mt_init,
+                                 initargs=(get_tensors, config)) as pool:
+            futures = {pool.submit(_tracer_mt_worker, (i, tracers[i], x0_list[i])): i
+                       for i in range(n)}
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                i = futures[fut]
+                try:
+                    j, out = fut.result()
+                    results[j] = out
+                except Exception as exc:
+                    if not return_failures:
+                        for other in futures:
+                            other.cancel()
+                        raise
+                    failures.append((i, exc))
+                    if verbose:
+                        print(f"\n[WARN] tracer {i} failed: {exc}")
+                if verbose:
+                    print(f"  completed {done}/{n}", end="\r")
+            if verbose:
+                print()
+        return (results, failures) if return_failures else results
 
     def save_data(
         self,
