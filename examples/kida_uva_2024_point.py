@@ -50,7 +50,7 @@ RTOL = 1e-3
 # ---------------------------------------------------------------------------
 
 print("Loading KIDA uva 2024 network...")
-net = Network(grains=True)
+net = Network(grains=True, dust_attenuation=True)
 net.load_from_disk(str(NETWORK_PATH))
 dropped = net.drop_passive_species()
 

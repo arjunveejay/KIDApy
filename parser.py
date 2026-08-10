@@ -1,8 +1,7 @@
 """
 Gas-phase + pseudo-grain reaction network parser.
 
-Parses a KIDA-format ``reactions.dat`` file and builds the sparse polynomial
-ODE tensors ``A`` and ``B`` for the system
+Parses a KIDA-format ``reactions.dat`` file and builds the sparse polynomial ODE tensors ``A`` and ``B`` for the system
 
     dx/dt = A x + B(x ⊗ x)
 
@@ -10,19 +9,15 @@ where ``x`` is a vector of species abundances per H nucleus.
 
 Supported chemistry
 -------------------
-* **Gas-phase reactions** — formula types 1–5 (cosmic-ray ionisation,
-  UV photodissociation, Kooij/ionpol rate laws).
-* **Pseudo-grain H₂ formation** (``grains=True``) — H₂ formation on grain
-  surfaces via the intermediate pseudo-species XH:
+* **Gas-phase reactions** — formula types 1–5 (cosmic-ray ionisation, UV photodissociation, Kooij/ionpol rate laws).
+* **Pseudo-grain H₂ formation** (``grains=True``) — H₂ formation on grain surfaces via the intermediate pseudo-species XH:
 
     H  →  XH             (frml 11, adsorption pseudo-rate)
-    XH + XH  →  H₂ + H   (frml 10, recombination)
+    XH + XH  →  H₂       (frml 10, recombination)
 
-* **Ion–grain recombination** (``grains=True``) — ion recombination with
-  grains (frml 0, itype 0), involving the pseudo-species GRAIN- and GRAIN0.
+* **Ion–grain recombination** (``grains=True``) — ion recombination with grains (frml 0, itype 0), involving the pseudo-species GRAIN- and GRAIN0.
 
-Full grain-surface chemistry (adsorption/desorption, surface reactions) is
-not supported by this module.
+Full grain-surface chemistry (adsorption/desorption, surface reactions) is not supported by this module.
 
 Quick start
 -----------
@@ -36,11 +31,9 @@ Quick start
 
 References
 ----------
-Wakelam, V. et al. (2012). A Kinetic Database for Astrochemistry (KIDA).
-    ApJS, 199, 21. https://doi.org/10.1088/0067-0049/199/1/21
+Wakelam, V. et al. (2012). A Kinetic Database for Astrochemistry (KIDA). ApJS, 199, 21. https://doi.org/10.1088/0067-0049/199/1/21
 
-Wakelam, V. et al. (2024). The 2024 KIDA network for interstellar chemistry.
-    A&A, 689, A63. https://doi.org/10.1051/0004-6361/202450606
+Wakelam, V. et al. (2024). The 2024 KIDA network for interstellar chemistry. A&A, 689, A63. https://doi.org/10.1051/0004-6361/202450606
 """
 
 __all__ = ["Network", "load_abundances"]
@@ -52,33 +45,51 @@ import scipy.sparse as sp
 from collections import defaultdict
 from typing import Dict
 
+import shielding
+
 
 # ---------------------------------------------------------------------------
 # Chemistry constants
 # ---------------------------------------------------------------------------
 
-#: Grain number density = grain_gas_ratio * nH
-grain_gas_ratio: float = 1.8e-12
+#: Grain parameters: radius [cm], material density [g cm⁻³], dust-to-gas mass ratio
+grain_radius: float = 1.0e-5
+grain_mass_density: float = 3.0
+dust_to_gas_mass: float = 1.0e-2
+
+#: Gas mass per grain [amu]
+_gas_mass_per_grain: float = ((4.0 / 3.0) * np.pi * grain_radius ** 3
+                              * grain_mass_density
+                              / (dust_to_gas_mass * 1.660538291e-24))
+
+#: Grain number density = grain_gas_ratio * nH.  Helium mass is not counted.
+grain_gas_ratio: float = 1.0 / _gas_mass_per_grain
 
 #: Cosmic-ray ionisation rate [s⁻¹]
-zeta_cr: float = 1.3e-17
+zeta_cr: float = 1.6e-17
 
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+def _shield_channel(rxn: dict):
+    """Return "H2", "CO", or None for a parsed reaction."""
+    if rxn["frml"] != 2 or len(rxn["reactants"]) != 1:
+        return None
+    return _SHIELDED_CHANNELS.get(
+        (rxn["reactants"][0], frozenset(rxn["products"])))
+
+
 def load_abundances(path: str) -> Dict[str, float]:
     """
     Load initial abundances from a two-column text file.
 
-    Lines starting with ``#`` are treated as comments.  Each data line has
-    the form::
+    Lines starting with ``#`` are treated as comments.  Each data line has the form::
 
         <species>  <abundance>
 
-    The electron abundance ``e-`` must **not** appear in the file; it is
-    computed externally from charge neutrality.
+    The electron abundance ``e-`` must **not** appear in the file; it is computed externally from charge neutrality.
 
     Parameters
     ----------
@@ -107,6 +118,12 @@ def load_abundances(path: str) -> Dict[str, float]:
 
 _PSEUDO_GRAIN_SPECIES = frozenset({"XH", "GRAIN-", "GRAIN0"})
 
+#: Self-shielded channels, ``(reactant, frozenset(products)) -> channel``.  Products are matched too, to exclude the photoionisation channels.
+_SHIELDED_CHANNELS = {
+    ("H2", frozenset({"H"})): "H2",
+    ("CO", frozenset({"C", "O"})): "CO",
+}
+
 
 # ---------------------------------------------------------------------------
 # Main class
@@ -116,25 +133,18 @@ class Network:
     """
     Gas-phase + pseudo-grain reaction network.
 
-    Reads a KIDA-format reactions file and builds sparse ODE tensors A (N×N)
-    and B (N×N²) such that
+    Reads a KIDA-format reactions file and builds sparse ODE tensors A (N×N) and B (N×N²) such that
 
         dx/dt = A x + B(x ⊗ x)
 
-    where x is the vector of species abundances per H nucleus and nH has been
-    absorbed into the 2-body rate coefficients.  Column j*N+k of B encodes
-    the reactant pair (j, k).
+    where x is the vector of species abundances per H nucleus and nH has been absorbed into the 2-body rate coefficients.  Column j*N+k of B encodes the reactant pair (j, k).
 
     Parameters
     ----------
     grains : bool
-        False (default) — pure gas-phase network.  Reactions with frml 10–11
-        and frml 0/itype 0 return zero rates; XH, GRAIN-, and GRAIN0 are
-        excluded from the species list.
+        False (default) — pure gas-phase network.  Reactions with frml 10–11 and frml 0/itype 0 return zero rates; XH, GRAIN-, and GRAIN0 are excluded from the species list.
 
-        True — gas-phase plus pseudo-grain reactions.  H₂ formation via XH
-        (frml 10/11) and ion–grain recombination via GRAIN-/GRAIN0 (frml 0,
-        itype 0) are active.  Grain temperature is not required.
+        True — gas-phase plus pseudo-grain reactions.  H₂ formation via XH (frml 10/11) and ion–grain recombination via GRAIN-/GRAIN0 (frml 0, itype 0) are active.  Grain temperature is not required.
 
     Environment dict
     ----------------
@@ -147,19 +157,24 @@ class Network:
             uv_flux  = 1.0,    # FUV field scaling (1 = standard Draine field)
         )
 
-    Optional: Tcap_2body (bool, default True) — clamp T to [Tmin, Tmax] when
-    evaluating Kooij / ionpol rate coefficients.
+    Optional: Tcap_2body (bool, default True) — clamp T to [Tmin, Tmax] when evaluating Kooij / ionpol rate coefficients.
     """
 
-    def __init__(self, grains: bool = False):
+    def __init__(self, grains: bool = False, self_shielding: bool = False,
+                 dust_attenuation: bool = False):
         """
         Parameters
         ----------
         grains : bool
-            Activate pseudo-grain reactions (H₂ formation via XH and
-            ion–grain recombination via GRAIN-/GRAIN0).
+            Activate pseudo-grain reactions (H₂ formation via XH and ion–grain recombination via GRAIN-/GRAIN0).
+        self_shielding : bool
+            Apply Lee et al. (1996) H₂ and CO shielding factors to the H₂ and CO photodissociation rates.  See :mod:`shielding`.
+        dust_attenuation : bool
+            Include the ``exp(-γ·Av)`` dust term in frml-2 photoreaction rates.  Off by default, on the assumption that ``uv_flux`` is already attenuated; enabling it as well would count the dust twice.
         """
         self.grains: bool = grains
+        self.self_shielding: bool = self_shielding
+        self.dust_attenuation: bool = dust_attenuation
 
         self.species: list = []
         self.species_map: dict = {}
@@ -177,8 +192,7 @@ class Network:
 
     def load_from_disk(self, filepath: str) -> None:
         """
-        Parse a KIDA-format ``reactions.dat`` file and populate
-        self.species, self.species_map, and self.reactions.
+        Parse a KIDA-format ``reactions.dat`` file and populate self.species, self.species_map, and self.reactions.
 
         Parameters
         ----------
@@ -191,14 +205,13 @@ class Network:
         """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Reactions file not found: '{filepath}'")
-        print(f"Reading: {filepath}")
+        # print(f"Reading: {filepath}")
         with open(filepath) as fh:
             self._parse_lines(fh.readlines())
 
     def get_operators(self, env: dict):
         """
-        Build the sparse ODE tensors ``A`` and ``B`` for the current
-        environment.
+        Build the sparse ODE tensors ``A`` and ``B`` for the current environment.
 
         Parameters
         ----------
@@ -216,6 +229,7 @@ class Network:
         Av = float(env["Av"])
         uv_flux = float(env["uv_flux"])
         Tcap_2body = bool(env.get("Tcap_2body", True))
+        shield = shielding.shield_factors(Av) if self.self_shielding else None
 
         N = len(self.species)
         A_rows, A_cols, A_data = [], [], []
@@ -233,7 +247,8 @@ class Network:
             if order == 0:
                 continue
 
-            k = self._calculate_rate(rxn, T, nH, Av, uv_flux, Tcap_2body)
+            k = self._calculate_rate(rxn, T, nH, Av, uv_flux, Tcap_2body,
+                                     shield)
             if k == 0.0:
                 continue
 
@@ -279,8 +294,7 @@ class Network:
 
     def get_operators_vectorized(self, env: dict):
         """
-        Vectorized :meth:`get_operators`: identical ``A``, ``B`` (to roundoff),
-        ~40x faster for repeated calls. Structure is cached on first use.
+        Vectorized :meth:`get_operators`: identical ``A``, ``B`` (to roundoff), ~40x faster for repeated calls. Structure is cached on first use.
 
         Parameters
         ----------
@@ -295,8 +309,7 @@ class Network:
         N = len(self.species)
 
         # ---- Build environment-independent structure once, then cache it. ----
-        # Only rate values depend on the environment; the sparsity pattern,
-        # contribution map and multi-range groups do not.
+        # Only rate values depend on the environment; the sparsity pattern, contribution map and multi-range groups do not.
         if getattr(self, "_fast_N", None) != N:
             supported = {0, 1, 2, 3, 4, 5, 10, 11}   # formula types handled here
             two_body = (4, 5, 6, 7, 8, 11)            # itypes whose rate absorbs nH
@@ -310,6 +323,9 @@ class Network:
             self._tn, self._tx = col("tmin"), col("tmax")
             self._norange = (self._tn <= -9000) & (self._tx >= 9000)
             self._twobody = np.isin(self._it, two_body) & np.isin(self._fr, [3, 4, 5])
+            ch = [_shield_channel(r) for r in rx]
+            self._sh_h2 = np.array([c == "H2" for c in ch])
+            self._sh_co = np.array([c == "CO" for c in ch])
 
             def coalesce(contribs, ncol):  # (row, col, sign, reaction) -> fixed CSR + scatter map
                 if not contribs:
@@ -341,8 +357,7 @@ class Network:
                               "(no third-order tensor is built).", RuntimeWarning, stacklevel=2)
             self._Astruct, self._Bstruct = coalesce(A, N), coalesce(B, N * N)
 
-            # Group reactions differing only by temperature range; the per-call
-            # selection (below) keeps the single entry valid at T.
+            # Group reactions differing only by temperature range; the per-call selection (below) keeps the single entry valid at T.
             grp = defaultdict(list)
             for i, r in enumerate(rx):
                 grp[(tuple(r["reactants"]), tuple(r["products"]), r["itype"])].append(i)
@@ -363,7 +378,11 @@ class Network:
         m = fr == 1                          # cosmic-ray ionisation
         k[m] = a[m] * zeta_cr
         m = fr == 2                          # UV photodissociation
-        k[m] = a[m] * uv * np.exp(-g[m] * Av)
+        k[m] = a[m] * uv * (np.exp(-g[m] * Av) if self.dust_attenuation else 1.0)
+        if self.self_shielding:
+            f_h2, f_co = shielding.shield_factors(Av)
+            k[self._sh_h2] *= f_h2
+            k[self._sh_co] *= f_co
         m = (fr == 3) & p                    # Kooij
         k[m] = a[m] * (Teff[m] / 300.0) ** b[m] * np.exp(-g[m] / Teff[m])
         m = (fr == 4) & p                    # ionpol1
@@ -376,13 +395,11 @@ class Network:
             gd = grain_gas_ratio * nH
             m = (fr == 0) & (it == 0) & p    # ion-grain recombination
             k[m] = a[m] * (Teff[m] / 300.0) ** b[m] * nH
-            m = (fr == 10) & p               # XH + XH -> H2 + H
+            m = (fr == 10) & p               # XH + XH -> H2
             k[m] = 8.64e6 * np.exp(-225.0 / Teff[m]) / gd * nH
             m = (fr == 11) & p               # H -> XH
             k[m] = a[m] * (Teff[m] / 300.0) ** b[m] * gd
-        # Zero every multi-range entry except the one selected at T: order each
-        # group (in-range first, then by position; otherwise by nearest
-        # boundary) and keep the first member per group.
+        # Zero every multi-range entry except the one selected at T: order each group (in-range first, then by position; otherwise by nearest boundary) and keep the first member per group.
         if self._mm.size:
             tn, tx = self._tn[self._mm], self._tx[self._mm]
             ir = (tn <= T) & (T <= tx)
@@ -393,8 +410,7 @@ class Network:
             act[self._mm] = False
             act[self._mm[o[np.r_[True, gs[1:] != gs[:-1]]]]] = True
             k = k * act
-        # Scatter signed rate contributions into the cached CSR pattern,
-        # summing per (row, col) slot with bincount.
+        # Scatter signed rate contributions into the cached CSR pattern, summing per (row, col) slot with bincount.
         mk = lambda S: sp.csr_matrix(
             (np.bincount(S["inv"], weights=k[S["rxn"]] * S["sign"], minlength=S["nd"]),
              S["idx"], S["ptr"]), shape=(N, S["ncol"]))
@@ -404,24 +420,16 @@ class Network:
         """
         Return the fixed COO index arrays ``(ai, aj)`` of the A matrix.
 
-        The sparsity pattern is a property of the reaction graph alone: it is
-        fixed by the 1-body reactions in the network (a loss on the reactant's
-        diagonal, and a gain in the reactant's column for each product) and is
-        independent of the environment (T, nH, Av, ...).  Rate *values* change
-        with the environment; these *positions* do not.  No rate coefficients
-        are evaluated here.
+        The sparsity pattern is a property of the reaction graph alone: it is fixed by the 1-body reactions in the network (a loss on the reactant's diagonal, and a gain in the reactant's column for each product) and is independent of the environment (T, nH, Av, ...).  Rate *values* change with the environment; these *positions* do not.  No rate coefficients are evaluated here.
 
-        The returned arrays span every 1-body reaction, so they are a superset
-        of the nonzeros that ``get_operators`` produces in any single
-        environment (where zero-rate reactions are dropped).
+        The returned arrays span every 1-body reaction, so they are a superset of the nonzeros that ``get_operators`` produces in any single environment (where zero-rate reactions are dropped).
 
         Returns
         -------
         ai : np.ndarray of int64, shape (nnz,)
             Row indices (species receiving a net linear contribution).
         aj : np.ndarray of int64, shape (nnz,)
-            Column indices (reactant species), with ``A[ai[n], aj[n]]`` the
-            n-th nonzero entry after duplicate summation.
+            Column indices (reactant species), with ``A[ai[n], aj[n]]`` the n-th nonzero entry after duplicate summation.
         """
         N = len(self.species)
         rows, cols = [], []
@@ -454,24 +462,16 @@ class Network:
         """
         Return the fixed COO index arrays ``(bi, bj, bk)`` of the B tensor.
 
-        Like :meth:`get_A_structure`, the pattern is purely topological: it is
-        fixed by which species appear as the two reactants / products of each
-        2-body reaction, and is independent of the environment.  No rate
-        coefficients are evaluated here.
+        Like :meth:`get_A_structure`, the pattern is purely topological: it is fixed by which species appear as the two reactants / products of each 2-body reaction, and is independent of the environment.  No rate coefficients are evaluated here.
 
-        Reactions sharing a reactant pair collapse onto the same B column and
-        duplicate ``(row, col)`` entries are coalesced, so the returned arrays
-        match the nonzero layout ``get_operators`` would produce if every
-        2-body reaction had a nonzero rate (a superset of any single
-        environment).
+        Reactions sharing a reactant pair collapse onto the same B column and duplicate ``(row, col)`` entries are coalesced, so the returned arrays match the nonzero layout ``get_operators`` would produce if every 2-body reaction had a nonzero rate (a superset of any single environment).
 
         Returns
         -------
         bi : np.ndarray of int64, shape (nnz,)
             Row indices (species receiving a net quadratic contribution).
         bj, bk : np.ndarray of int64, shape (nnz,)
-            Reactant-pair indices, with ``B[bi[n], bj[n]*N + bk[n]]`` the n-th
-            nonzero entry after duplicate summation.
+            Reactant-pair indices, with ``B[bi[n], bj[n]*N + bk[n]]`` the n-th nonzero entry after duplicate summation.
         """
         N = len(self.species)
         rows, cols = [], []
@@ -501,12 +501,24 @@ class Network:
         flat_col = dummy.col.astype(np.int64, copy=False)
         return bi, flat_col // N, flat_col % N
 
+    def get_shielded_reactions(self) -> dict:
+        """
+        Return ``{"H2": [idx, ...], "CO": [idx, ...]}``, the indices into self.reactions of the self-shielded photodissociation channels.
+
+        A channel absent from the network maps to an empty list.
+        """
+        out = {"H2": [], "CO": []}
+        for i, rxn in enumerate(self.reactions):
+            ch = _shield_channel(rxn)
+            if ch is not None:
+                out[ch].append(i)
+        return out
+
     def get_passive_species(self) -> list:
         """
         Return species that never appear as a reactant (pure-sink species).
 
-        These species contribute no columns to A or B, so removing them
-        before calling get_operators is safe and reduces the ODE dimension.
+        These species contribute no columns to A or B, so removing them before calling get_operators is safe and reduces the ODE dimension.
 
         Returns
         -------
@@ -625,8 +637,8 @@ class Network:
         self.species_map = {s: i for i, s in enumerate(self.species)}
         self.reactions = parsed_reactions
 
-        print(f"Loaded {len(self.reactions)} reactions, "
-              f"{len(self.species)} species.")
+        # print(f"Loaded {len(self.reactions)} reactions, "
+        #       f"{len(self.species)} species.")
 
     def _is_mantle(self, s: str) -> bool:
         """Return True if s is a mantle (K-prefix) species name."""
@@ -639,9 +651,7 @@ class Network:
 
     def _select_multirange_entries(self, reactions: list, T: float) -> list:
         """
-        For reactions with multiple temperature-range entries, keep only the
-        entry whose [Tmin, Tmax] contains T, or the nearest one if T is
-        out of range.  Single-entry reactions pass through unchanged.
+        For reactions with multiple temperature-range entries, keep only the entry whose [Tmin, Tmax] contains T, or the nearest one if T is out of range.  Single-entry reactions pass through unchanged.
         """
         groups: dict = defaultdict(list)
         for i, rxn in enumerate(reactions):
@@ -667,11 +677,12 @@ class Network:
 
     def _calculate_rate(self, rxn: dict, T: float, nH: float,
                         Av: float, uv_flux: float,
-                        Tcap_2body: bool) -> float:
+                        Tcap_2body: bool, shield=None) -> float:
         """Compute the effective scalar rate coefficient for a single reaction.
 
-        For 2-body reactions nH is already absorbed, so that the contribution
-        to dx/dt is k_eff * x_i * x_j with x in abundance-per-H units.
+        For 2-body reactions nH is already absorbed, so that the contribution to dx/dt is k_eff * x_i * x_j with x in abundance-per-H units.
+
+        ``shield``, when given, is the ``(f_H2, f_CO)`` pair from :func:`shielding.shield_factors`, applied to the matching frml-2 channel.
 
         Supported formula types
         -----------------------
@@ -681,7 +692,7 @@ class Network:
         frml 4  — ionpol1
         frml 5  — ionpol2
         frml 0, itype 0   — ion–grain recombination (active when grains=True)
-        frml 10 — XH + XH → H₂ + H  (grains=True)
+        frml 10 — XH + XH → H₂  (grains=True)
         frml 11 — H → XH  (grains=True)
         """
         frml = rxn["frml"]
@@ -703,7 +714,14 @@ class Network:
 
         # --- frml 2: external UV photoreactions ---
         if frml == 2:
-            return a * uv_flux * np.exp(-g * Av)
+            k = a * uv_flux
+            if self.dust_attenuation:
+                k *= np.exp(-g * Av)
+            if shield is not None:
+                ch = _shield_channel(rxn)
+                if ch is not None:
+                    k *= shield[0] if ch == "H2" else shield[1]
+            return k
 
         # --- frml 3/4/5: Kooij / ionpol ---
         if frml in (3, 4, 5):
@@ -726,8 +744,7 @@ class Network:
         if Teff <= 0.0:
             return 0.0
 
-        # --- frml 0: ion–grain recombination (itype 0 is the only frml=0
-        #     reaction type present in a gas-phase reactions file) ---
+        # --- frml 0: ion–grain recombination (itype 0 is the only frml=0 reaction type present in a gas-phase reactions file) ---
         if frml == 0:
             if itype == 0:
                 if self.grains:
@@ -741,7 +758,7 @@ class Network:
                 return 0.0
             grain_density = grain_gas_ratio * nH
             if frml == 10:
-                # XH + XH → H₂ + H  (Teff is gas temperature)
+                # XH + XH → H₂  (Teff is gas temperature)
                 return 8.64e6 * np.exp(-225.0 / Teff) / grain_density * nH
             # frml == 11: H → XH  (adsorption pseudo-rate)
             return a * (Teff / 300.0) ** b * grain_density 

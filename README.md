@@ -1,6 +1,6 @@
 # Gas-phase KIDA parser and solver
 
-Two modules for building and integrating gas-phase astrochemical reaction networks from KIDA-format input files.
+Modules for building and integrating gas-phase astrochemical reaction networks from KIDA-format input files.
 
 The parser exposes the explicit polynomial structure of the ODE right-hand side as sparse matrices $A \in \mathbb R^{N \times N}$ and $B \in \mathbb R^{N \times N^2}$, rather than a plain callable $f(x)$, making it directly amenable to intrusive model reduction.  The solver
 exploits this structure to assemble an analytic Jacobian
@@ -14,12 +14,16 @@ The current implementation only supports chemical networks that contain unimolec
 |------|----------|
 | `parser.py` | `Network`, `load_abundances` |
 | `solver.py` | `QuadraticSolver`, `QuadraticSolverTracer` |
-| `kida.uva.2024/` | KIDA uva 2024 gas-phase reactions and initial abundances |
+| `shielding.py` | H₂ and CO self-shielding of the FUV photodissociation rates |
+| `networks/kida.uva.2024/` | KIDA uva 2024 gas-phase reactions and initial abundances |
 | `networks/nelson/` | Nelson gas-phase reactions and initial abundances |
+| `networks/osu_09_2008/` | OSU 09/2008 gas-phase reactions and initial abundances |
+| `networks/lee1996_shielding.dat` | Lee et al. (1996) H₂ and CO shielding tables |
 | `examples/kida_uva_2024_point.py` | Point integration of the KIDA uva 2024 network |
 | `examples/kida_uva_2024_tracer.py` | Tracer integration of the KIDA uva 2024 network |
 | `examples/nelson_point.py` | Point integration of the Nelson network |
 | `examples/nelson_tracer.py` | Tracer integration of the Nelson network |
+| `examples/nelson_shielding.py` | Effect of CO self-shielding on the Nelson network |
 
 ---
 
@@ -46,12 +50,14 @@ where $x$ is the vector of species abundances per H nucleus. $A$ encodes unimole
 **Constructor**
 
 ```python
-Network(grains=False)
+Network(grains=False, self_shielding=False, dust_attenuation=False)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `grains` | bool | Activate pseudo-grain reactions (H₂ formation via XH, ion–grain recombination via GRAIN-/GRAIN0). Default: `False`. |
+| `self_shielding` | bool | Apply Lee et al. (1996) H₂ and CO shielding factors to the H₂ and CO photodissociation rates. See `shielding.py`. Default: `False`. |
+| `dust_attenuation` | bool | Include the $\exp(-\gamma A_v)$ dust term in frml-2 photoreaction rates. Off by default, on the assumption that `uv_flux` is already attenuated. Default: `False`. |
 
 **Methods**
 
@@ -88,7 +94,7 @@ Reactions that list multiple $[T_{\min}, T_{\max}]$ ranges are resolved at load 
 | 4 | ionpol1 |
 | 5 | ionpol2 |
 | 0 | Ion–grain recombination (`grains=True`) |
-| 10 | $\mathrm{XH} + \mathrm{XH} \to \mathrm{H_2} + \mathrm{H}$ (`grains=True`) |
+| 10 | $\mathrm{XH} + \mathrm{XH} \to \mathrm{H_2}$ (`grains=True`) |
 | 11 | $\mathrm{H} \to \mathrm{XH}$ (`grains=True`) |
 
 **Pseudo-grain species** (`grains=False`): XH, GRAIN-, and GRAIN0 are excluded from the species list.
@@ -97,10 +103,14 @@ Reactions that list multiple $[T_{\min}, T_{\max}]$ ranges are resolved at load 
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `grain_gas_ratio` | $1.8 \times 10^{-12}$ | Grain-to-gas number density  |
-| `zeta_cr` | $1.3 \times 10^{-17}\ \mathrm{s}^{-1}$ | Cosmic-ray ionisation rate |
+| `grain_radius` | $1.0 \times 10^{-5}\ \mathrm{cm}$ | Grain radius |
+| `grain_mass_density` | $3.0\ \mathrm{g\ cm^{-3}}$ | Grain material density |
+| `dust_to_gas_mass` | $1.0 \times 10^{-2}$ | Dust-to-gas mass ratio |
+| `grain_gas_ratio` | $1.32 \times 10^{-12}$ | Grain-to-gas number density, $n_\mathrm{gr}/n_\mathrm{H}$ |
+| `zeta_cr` | $1.6 \times 10^{-17}\ \mathrm{s}^{-1}$ | Cosmic-ray ionisation rate |
 
-Both are module-level variables and can be overridden before calling `get_operators` if a different value is required.
+`grain_gas_ratio` is derived from the three grain parameters above as
+$\mathcal{D}\,m_\mathrm{amu} / (\tfrac{4}{3}\pi a^3 \rho_d)$.
 
 ### `load_abundances`
 
@@ -188,7 +198,15 @@ Three schemes are available for reconstructing $p(t)$ between the discrete hydro
 ```python
 t, y = tracer.solve(dt_hydro, pt, get_tensors, x0, atol, rtol, min_scale,
                     method="BDF", interpolation="piecewise_constant",
-                    use_scaling=False, log_cols=None, t_eval=None)
+                    use_scaling=False, verbose=False, log_cols=None,
+                    t_eval=None, jac_structure=None)
+
+results = tracer.solve_multiple(dt_hydro, tracers, get_tensors, x0, atol, rtol,
+                                min_scale, method="BDF",
+                                interpolation="piecewise_constant",
+                                use_scaling=False, log_cols=None, t_eval=None,
+                                jac_structure=None, n_workers=1, verbose=False,
+                                return_failures=False)
 
 out, header = tracer.save_data(t, y, pt, species, save_path="run",
                                save_csv=True, dt_hydro=None,
@@ -214,6 +232,8 @@ out, header = tracer.save_data(t, y, pt, species, save_path="run",
 
 For `"piecewise_constant"`, returns `(list_of_t, list_of_y)` — one entry per hydrodynamic segment. For `"cubic_spline"` and `"pchip"`, returns continuous $(t, y)$ arrays.
 
+**Pre-equilibration.** Unlike `QuadraticSolver.solve`, the tracer solver does not begin the trajectory from `x0` directly. It first integrates for a hardcoded $10^4$ yr at the fixed conditions of `pt[0]`, seeded with `x0`, and uses that relaxed state as the initial condition for the trajectory. The returned `y[:, 0]` is therefore the equilibrated state, not the `x0` passed in.
+
 ---
 
 ## Quick start
@@ -224,10 +244,10 @@ from solver import QuadraticSolver
 import numpy as np
 
 net = Network(grains=True)
-net.load_from_disk("kida.uva.2024/gas_reactions_kida.uva.2024.in")
+net.load_from_disk("networks/kida.uva.2024/gas_reactions_kida.uva.2024.in")
 net.drop_passive_species()
 
-abund = load_abundances("kida.uva.2024/abundances.in")
+abund = load_abundances("networks/kida.uva.2024/abundances.in")
 x0 = np.zeros(len(net.species))
 for name, val in abund.items():
     if name in net.species_map:
@@ -254,7 +274,16 @@ python examples/kida_uva_2024_point.py
 python examples/kida_uva_2024_tracer.py
 python examples/nelson_point.py
 python examples/nelson_tracer.py
+python examples/nelson_shielding.py
 ```
+
+---
+
+## Author
+
+Arjun Vijaywargiya
+[![ORCID](https://img.shields.io/badge/ORCID-0000--0001--5391--5560-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0000-0001-5391-5560)
+The University of Texas at Austin
 
 ---
 
@@ -265,7 +294,16 @@ The 2024 KIDA network for interstellar chemistry.
 *A&A*, 689, A63.
 https://doi.org/10.1051/0004-6361/202450606
 
+Gong, M., Ostriker, E. C., & Wolfire, M. G. (2017).
+A Simple and Accurate Network for Hydrogen and Carbon Chemistry in the Interstellar Medium.
+*ApJ*, 843, 38.
+https://doi.org/10.3847/1538-4357/aa7561
+
 Wakelam, V., Herbst, E., Loison, J.-C., et al. (2012).
 A Kinetic Database for Astrochemistry (KIDA).
 *ApJS*, 199, 21.
 https://doi.org/10.1088/0067-0049/199/1/21
+
+Lee, H.-H., Herbst, E., Pineau des Forêts, G., Roueff, E., & Le Bourlot, J. (1996).
+Photodissociation of H₂ and CO and time dependent chemistry in inhomogeneous interstellar clouds.
+*A&A*, 311, 690.

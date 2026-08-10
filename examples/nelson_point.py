@@ -46,7 +46,7 @@ RTOL = 1e-3
 # ---------------------------------------------------------------------------
 
 print("Loading Nelson network...")
-net = Network(grains=False)
+net = Network(grains=False, dust_attenuation=True)
 net.load_from_disk(str(NETWORK_PATH))
 dropped = net.drop_passive_species()
 

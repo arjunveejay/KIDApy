@@ -1,4 +1,12 @@
 ! Nelson & Langer (1999, ApJ 524, 923) simplified C–O network in KIDA-style format
+!
+! NOTE ON PHOTOREACTION NORMALIZATION (itype 3):
+!   Nelson & Langer calibrate their photorates as k = alpha * G0 * exp(-gamma*Av)
+!   with G0 the FUV field in HABING (1968) units (their G0 = 1 = standard field).
+!   This code drives the itype-3 reactions with a DRAINE-normalized local field.
+!   Because the Draine FUV field is ~1.7x the Habing field, the six photoreaction 
+!   alphas below have been MULTIPLIED by 1.7 relative to the paper's values. 
+!
 ! only columns starting with "*" are used by the code
 !   *Reactants  *Products     *alpha     *beta      *gamma     F        g      err *itype Tmin  Tmax *frml  *ID ni r 
 
@@ -10,7 +18,7 @@ He         CR                     He+        e-                                 
 H3+        C                      CHx        H2                                                     2.000e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     3 1  1
 H3+        O                      OHx        H2                                                     8.000e-10  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     4 1  1
 H3+        CO                     HCO+       H2                                                     1.700e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     5 1  1
-He+        H2                     He         H2+                                                    7.000e-15  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     6 1  1
+He+        H2                     He         H+         H                                           7.000e-15  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     6 1  1
 He+        CO                     C+         O          He                                          1.600e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     7 1  1
 C+         H2                     CHx        H                                                      4.000e-16  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     8 1  1
 C+         OHx                    HCO+                                                              1.000e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  4  -9999   9999  3     9 1  1
@@ -30,9 +38,10 @@ M+         e-                     M                                             
 H3+        M                      M+         e-         H2                                         2.000e-09  0.000e+00  0.000e+00 2.00e+00 0.00e+00 logn  5  -9999   9999  3    17 1  1
 
 ! Photoreactions (FUV, k = alpha * uv_flux * exp(-gamma * Av); Photon never in first column)
-C          Photon                 C+         e-                                                    3.000e-10  0.000e+00  3.000e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    18 1  1
-CHx        Photon                 C          H                                                     1.000e-09  0.000e+00  1.500e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    19 1  1
-CO         Photon                 C          O                                                     1.000e-10  0.000e+00  3.000e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    20 1  1
-OHx        Photon                 O          H                                                     5.000e-10  0.000e+00  1.700e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    21 1  1
-M          Photon                 M+         e-                                                    2.000e-10  0.000e+00  1.900e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    22 1  1
-HCO+       Photon                 CO         H                                                     1.500e-10  0.000e+00  2.500e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    23 1  1
+! alpha values = Nelson & Langer x 1.7 (Habing->Draine field-normalization; see header)
+C          Photon                 C+         e-                                                    5.100e-10  0.000e+00  3.000e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    18 1  1
+CHx        Photon                 C          H                                                     1.700e-09  0.000e+00  1.500e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    19 1  1
+CO         Photon                 C          O                                                     1.700e-10  0.000e+00  3.000e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    20 1  1
+OHx        Photon                 O          H                                                     8.500e-10  0.000e+00  1.700e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    21 1  1
+M          Photon                 M+         e-                                                    3.400e-10  0.000e+00  1.900e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    22 1  1
+HCO+       Photon                 CO         H                                                     2.550e-10  0.000e+00  2.500e+00 2.00e+00 0.00e+00 logn  3  -9999   9999  2    23 1  1

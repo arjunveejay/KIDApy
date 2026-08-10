@@ -3,20 +3,15 @@ Solvers for the quadratic ODE system
 
     dx/dt = A x + B(x ⊗ x)
 
-arising from gas-phase astrochemical reaction networks. Both classes exploit
-the explicit sparse structure of A and B to provide an analytic Jacobian,
-enabling efficient convergence of the stiff BDF integrator.
+arising from gas-phase astrochemical reaction networks. Both classes exploit the explicit sparse structure of A and B to provide an analytic Jacobian, enabling efficient convergence of the stiff BDF integrator.
 
 Classes
 -------
 QuadraticSolver
-    Integrates the autonomous system (fixed A, B) at a single physical
-    environment.
+    Integrates the autonomous system (fixed A, B) at a single physical environment.
 
 QuadraticSolverTracer
-    Integrates the non-autonomous system A(p(t)), B(p(t)) along a tracer
-    trajectory, with selectable interpolation of the physical conditions
-    between hydrodynamic snapshots.
+    Integrates the non-autonomous system A(p(t)), B(p(t)) along a tracer trajectory, with selectable interpolation of the physical conditions between hydrodynamic snapshots.
 """
 
 
@@ -31,9 +26,7 @@ from scipy.interpolate import CubicSpline, PchipInterpolator
 from typing import Tuple
 
 
-# Module-level worker for QuadraticSolverTracer.solve_multiple. get_tensors and
-# the shared solve config are passed once per process via the pool initializer
-# (not re-pickled per task); each task carries only its trajectory and x0.
+# Module-level worker for QuadraticSolverTracer.solve_multiple. get_tensors and the shared solve config are passed once per process via the pool initializer (not re-pickled per task); each task carries only its trajectory and x0.
 _MT_get_tensors = None
 _MT_config = None
 
@@ -56,15 +49,9 @@ def _tracer_mt_worker(task):
 
 def _make_jac(Acsr, B, N):
     """
-    Build a ``jac(t, x)`` callable for J = A + B(x, ·) + B(·, x) whose sparsity
-    structure is computed **once**.
+    Build a ``jac(t, x)`` callable for J = A + B(x, ·) + B(·, x) whose sparsity structure is computed **once**.
 
-    The nonzero layout of J (the union of A's pattern and the quadratic
-    derivative pattern) does not change during a solve — only the values do.
-    This precomputes the CSR ``indptr``/``indices`` and a map from each
-    contribution to its data slot, so every call only refills the value array
-    with a single ``np.bincount`` instead of re-running ``sum_duplicates`` and a
-    sparse ``A + Jq`` addition.
+    The nonzero layout of J (the union of A's pattern and the quadratic derivative pattern) does not change during a solve — only the values do.  This precomputes the CSR ``indptr``/``indices`` and a map from each contribution to its data slot, so every call only refills the value array with a single ``np.bincount`` instead of re-running ``sum_duplicates`` and a sparse ``A + Jq`` addition.
 
     Parameters
     ----------
@@ -126,20 +113,11 @@ def _make_jac(Acsr, B, N):
 
 class _TracerJacobian:
     """
-    Reusable Jacobian assembler for a *time-dependent* quadratic system whose
-    sparsity pattern is fixed by the reaction network, not by the environment.
+    Reusable Jacobian assembler for a *time-dependent* quadratic system whose sparsity pattern is fixed by the reaction network, not by the environment.
 
-    Built once from the topology index arrays returned by
-    ``Network.get_A_structure()`` and ``Network.get_B_structure()`` (an
-    environment-independent superset of every ``get_tensors`` output).  Each ODE
-    step calls :meth:`assemble` with the current ``A_t``, ``B_t`` — whatever
-    subset of the fixed pattern the parser emits — and the state ``x``; their
-    values are scattered onto the precomputed union structure and
-    ``J = A + B(x, ·) + B(·, x)`` is returned.
+    Built once from the topology index arrays returned by ``Network.get_A_structure()`` and ``Network.get_B_structure()`` (an environment-independent superset of every ``get_tensors`` output).  Each ODE step calls :meth:`assemble` with the current ``A_t``, ``B_t`` — whatever subset of the fixed pattern the parser emits — and the state ``x``; their values are scattered onto the precomputed union structure and ``J = A + B(x, ·) + B(·, x)`` is returned.
 
-    The union CSR layout (``indptr``/``indices``), the contribution→slot map,
-    and the scatter maps are all computed once, so the per-step cost is O(nnz):
-    no ``sum_duplicates`` and no sparse ``A + Jq`` addition per call.
+    The union CSR layout (``indptr``/``indices``), the contribution→slot map, and the scatter maps are all computed once, so the per-step cost is O(nnz): no ``sum_duplicates`` and no sparse ``A + Jq`` addition per call.
     """
 
     def __init__(self, ai, aj, bi, bj, bk, N):
@@ -153,8 +131,7 @@ class _TracerJacobian:
         self.n_a = ai.size
         self.m = bi.size
 
-        # Sorted flat keys, used to scatter a variable-pattern A_t / B_t onto
-        # the fixed value arrays via searchsorted.
+        # Sorted flat keys, used to scatter a variable-pattern A_t / B_t onto the fixed value arrays via searchsorted.
         NN = self.N * self.N
         a_keys = ai * self.N + aj                 # A is (N, N)
         b_keys = bi * NN + (bj * self.N + bk)     # B is (N, N*N)
@@ -205,12 +182,9 @@ class QuadraticSolver:
     """
     Solver for the quadratic ODE dx/dt = A x + B(x, x).
 
-    A is (N x N) sparse and B is (N x N²) sparse, where column j*N+k of B
-    encodes the coefficient for the bilinear term x[j]*x[k].
+    A is (N x N) sparse and B is (N x N²) sparse, where column j*N+k of B encodes the coefficient for the bilinear term x[j]*x[k].
 
-    All methods treat A and B as fixed for the duration of a single solve
-    call.  To integrate over changing conditions, call solve repeatedly and
-    chain the solutions.
+    All methods treat A and B as fixed for the duration of a single solve call.  To integrate over changing conditions, call solve repeatedly and chain the solutions.
     """
 
     # ------------------------------------------------------------------
@@ -307,19 +281,15 @@ class QuadraticSolver:
         x0 : np.ndarray, shape (N,)
             Initial state.
         atol : float
-            Absolute tolerance.  When scale is provided this applies to the
-            O(1) scaled variables; otherwise it applies directly to x.
+            Absolute tolerance.  When scale is provided this applies to the O(1) scaled variables; otherwise it applies directly to x.
         rtol : float
             Relative tolerance.
         method : str
-            Integration method passed to scipy.integrate.solve_ivp.
-            Default: "BDF".
+            Integration method passed to scipy.integrate.solve_ivp.  Default: "BDF".
         t_eval : array-like or None
             Times at which to store the solution.
         scale : np.ndarray, shape (N,), or None
-            When provided the system is solved in scaled coordinates
-            z = x / scale, then unscaled before returning.  scale must be
-            positive.  Useful when x spans many orders of magnitude.
+            When provided the system is solved in scaled coordinates z = x / scale, then unscaled before returning.  scale must be positive.  Useful when x spans many orders of magnitude.
 
         Returns
         -------
@@ -395,19 +365,16 @@ class QuadraticSolver:
         """
         Save a solution to .npy and .csv files.
 
-        The output array has shape (Nt, 1 + N): the first column is t,
-        followed by one column per state variable.
+        The output array has shape (Nt, 1 + N): the first column is t, followed by one column per state variable.
 
         Parameters
         ----------
         path : str
-            Base path.  Any extension is stripped; .npy and .csv are written
-            at {root}.npy and {root}.csv.
+            Base path.  Any extension is stripped; .npy and .csv are written at {root}.npy and {root}.csv.
         t : np.ndarray, shape (Nt,)
         y : np.ndarray, shape (N, Nt)
         col_names : list of str or None
-            Names for the N state-variable columns.  Used as the CSV header.
-            If None, columns are named x0, x1, ..., x{N-1}.
+            Names for the N state-variable columns.  Used as the CSV header.  If None, columns are named x0, x1, ..., x{N-1}.
 
         Returns
         -------
@@ -491,21 +458,15 @@ class QuadraticSolver:
 
 class QuadraticSolverTracer:
     """
-    Solver for chemistry along a tracer trajectory with selectable
-    interpolation of the physical conditions.
+    Solver for chemistry along a tracer trajectory with selectable interpolation of the physical conditions.
 
     The solver advances the non-autonomous quadratic system
 
         dx/dt = A(p(t)) x + B(p(t))(x, x)
 
-    where ``p(t) = [nH(t), T(t), Tgrain(t), Av(t), uv_flux(t)]`` is the
-    tracer's hydrodynamic trajectory. For ``"piecewise_constant"``,
-    ``A(p(t))`` and ``B(p(t))`` are held fixed over each hydro step. For
-    ``"cubic_spline"`` and ``"pchip"``, ``p(t)`` is interpolated
-    continuously in time before calling ``get_tensors``.
+    where ``p(t) = [nH(t), T(t), Tgrain(t), Av(t), uv_flux(t)]`` is the tracer's hydrodynamic trajectory. For ``"piecewise_constant"``, ``A(p(t))`` and ``B(p(t))`` are held fixed over each hydro step. For ``"cubic_spline"`` and ``"pchip"``, ``p(t)`` is interpolated continuously in time before calling ``get_tensors``.
 
-    Supported interpolation modes are:
-    ``"piecewise_constant"``, ``"cubic_spline"``, and ``"pchip"``.
+    Supported interpolation modes are: ``"piecewise_constant"``, ``"cubic_spline"``, and ``"pchip"``.
     """
 
     _PT_COLS = ("nH", "T", "Tgrain", "Av", "uv_flux")
@@ -550,8 +511,7 @@ class QuadraticSolverTracer:
         rtol : float
             Relative tolerance for all ODE solves.
         min_scale : float
-            Lower bound used when constructing the scale vector for scaled
-            solves. It is also used in the tracer's internal floor logic.
+            Lower bound used when constructing the scale vector for scaled solves. It is also used in the tracer's internal floor logic.
         method : str, optional
             ODE integration method passed to ``scipy.integrate.solve_ivp``.
         interpolation : {"piecewise_constant", "cubic_spline", "pchip"}, optional
@@ -565,14 +525,7 @@ class QuadraticSolverTracer:
         t_eval : array-like or None, optional
             Optional output time grid over the full trajectory.
         jac_structure : tuple or None, optional
-            Fixed Jacobian sparsity topology as
-            ``(ai, aj, bi, bj, bk)`` from ``Network.get_A_structure()`` and
-            ``Network.get_B_structure()``.  When provided (spline/PCHIP modes
-            only), the Jacobian structure is built once and only its values are
-            refilled per step, instead of reassembling it on every call.  The
-            pattern must be an environment-independent superset of every
-            ``get_tensors`` output.  ``None`` (default) uses the per-call
-            :meth:`QuadraticSolver.compute_jacobian`.
+            Fixed Jacobian sparsity topology as ``(ai, aj, bi, bj, bk)`` from ``Network.get_A_structure()`` and ``Network.get_B_structure()``.  When provided (spline/PCHIP modes only), the Jacobian structure is built once and only its values are refilled per step, instead of reassembling it on every call.  The pattern must be an environment-independent superset of every ``get_tensors`` output.  ``None`` (default) uses the per-call :meth:`QuadraticSolver.compute_jacobian`.
 
         Returns
         -------
@@ -604,7 +557,7 @@ class QuadraticSolverTracer:
         _, y_eq = q.solve(
             A0,
             B0,
-            (0.0, 3600 * 24 * 365 * 1e4),
+            (0.0, 3600 * 24 * 365.25 * 1e4),
             x0,
             method=method,
             atol=x_floor,
@@ -653,9 +606,7 @@ class QuadraticSolverTracer:
             cache[0] = t_c
             return cache[1], cache[2]
 
-        # Optional fast path: build the Jacobian sparsity structure ONCE from
-        # the network topology and refill values per step. Diagonal scaling
-        # preserves the pattern, so the same assembler serves the scaled path.
+        # Optional fast path: build the Jacobian sparsity structure ONCE from the network topology and refill values per step. Diagonal scaling preserves the pattern, so the same assembler serves the scaled path.
         tracer_jac = None
         if jac_structure is not None:
             ai, aj, bi, bj, bk = jac_structure
@@ -753,12 +704,9 @@ class QuadraticSolverTracer:
                 print(f"{interpolation} segment {i + 1}/{M - 1}: nfev={sol.nfev}  njev={sol.njev}  nout={sol.t.size}")
 
         if t_eval_arr is not None:
-            # An explicit grid is partitioned across segments by the half-open
-            # filter [knot_i, knot_{i+1}); the points are disjoint, so the
-            # concatenation reproduces the requested grid with nothing to drop.
+            # An explicit grid is partitioned across segments by the half-open filter [knot_i, knot_{i+1}); the points are disjoint, so the concatenation reproduces the requested grid with nothing to drop.
             return np.concatenate(all_t), np.hstack(all_y)
-        # Adaptive output: consecutive segments both include the shared knot
-        # time, so drop the duplicate at each boundary.
+        # Adaptive output: consecutive segments both include the shared knot time, so drop the duplicate at each boundary.
         t_out = [all_t[0]]
         y_out = [all_y[0]]
         for i in range(1, len(all_t)):
@@ -801,30 +749,24 @@ class QuadraticSolverTracer:
         """
         Solve many independent tracer trajectories in parallel.
 
-        Each tracer is integrated with :meth:`solve`; parallelism is across
-        trajectories (each trajectory's hydro steps remain sequential) using a
-        process pool. All solve arguments are shared across trajectories.
+        Each tracer is integrated with :meth:`solve`; parallelism is across trajectories (each trajectory's hydro steps remain sequential) using a process pool. All solve arguments are shared across trajectories.
 
         Parameters
         ----------
         tracers : sequence of np.ndarray
             One physical trajectory ``pt`` (shape (M, 5)) per solve.
         x0 : np.ndarray
-            Either one state vector (shape (N,), reused for every tracer) or one
-            per tracer (shape (n_tracers, N) or (N, n_tracers)).
+            Either one state vector (shape (N,), reused for every tracer) or one per tracer (shape (n_tracers, N) or (N, n_tracers)).
         n_workers : int
             Number of worker processes. ``1`` runs serially.
         return_failures : bool
-            If ``True``, failed trajectories are stored as ``None`` and returned
-            as ``(results, failures)`` with ``failures`` a list of ``(index,
-            exception)``; otherwise the first failure is raised.
+            If ``True``, failed trajectories are stored as ``None`` and returned as ``(results, failures)`` with ``failures`` a list of ``(index, exception)``; otherwise the first failure is raised.
         Other parameters are passed through to :meth:`solve`.
 
         Returns
         -------
         results : list
-            ``(t, y)`` per tracer, in input order (``None`` for failures when
-            ``return_failures=True``).
+            ``(t, y)`` per tracer, in input order (``None`` for failures when ``return_failures=True``).
         failures : list, optional
             Returned only when ``return_failures=True``.
         """
@@ -893,12 +835,7 @@ class QuadraticSolverTracer:
         """
         Save tracer output to ``.npy`` and optionally ``.csv``.
 
-        For ``interpolation="piecewise_constant"``, ``t`` and ``y`` should be
-        the ``(all_t, all_y)`` lists returned by :meth:`solve`. For
-        ``"cubic_spline"`` and ``"pchip"``, ``t`` and ``y`` should be the
-        continuous ``(t, y)`` arrays returned by :meth:`solve`, and
-        ``dt_hydro`` must be provided so the physical trajectory can be
-        reconstructed at each output time.
+        For ``interpolation="piecewise_constant"``, ``t`` and ``y`` should be the ``(all_t, all_y)`` lists returned by :meth:`solve`. For ``"cubic_spline"`` and ``"pchip"``, ``t`` and ``y`` should be the continuous ``(t, y)`` arrays returned by :meth:`solve`, and ``dt_hydro`` must be provided so the physical trajectory can be reconstructed at each output time.
         """
         interpolation = str(interpolation)
         if interpolation not in self._VALID_INTERPOLATION:
@@ -1032,9 +969,7 @@ class QuadraticSolverTracer:
             if t_eval_arr is not None:
                 t_span_i = (t_knots[i], t_knots[i + 1])
                 seg_t_eval_abs = t_eval_arr[(t_eval_arr >= t_span_i[0]) & (t_eval_arr <= t_span_i[1])]
-                # For piecewise plotting/output we want both exact segment
-                # endpoints present, even if the user-supplied global grid
-                # does not land on the knots.
+                # For piecewise plotting/output we want both exact segment endpoints present, even if the user-supplied global grid does not land on the knots.
                 seg_t_eval_abs = np.unique(
                     np.concatenate(
                         [

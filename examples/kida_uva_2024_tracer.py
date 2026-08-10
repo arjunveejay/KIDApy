@@ -55,7 +55,7 @@ METHOD    = "BDF"
 # ---------------------------------------------------------------------------
 
 print("Loading KIDA uva 2024 network...")
-net = Network(grains=True)
+net = Network(grains=True, dust_attenuation=True)
 net.load_from_disk(str(NETWORK_PATH))
 dropped = net.drop_passive_species()
 
@@ -104,10 +104,11 @@ Av = (
     + 0.75 * np.exp(-0.5 * ((t_kyr - 620.0) / 200.0) ** 2)
     - 0.58 * (t_kyr / t_kyr.max())
 )
+# Incident field, *not* dust-attenuated: the network is built with
+# dust_attenuation=True, so it applies exp(-gamma*Av) per photoreaction itself.
 uv_flux = (
-    120.0 * np.exp(-4.2 * Av)
+    120.0
     + 18.0 * np.exp(-0.5 * ((t_kyr - 1350.0) / 170.0) ** 2)
-    + 1.0e-5
 )
 
 pt = np.column_stack([nH, T, Tgrain, Av, uv_flux]).astype(np.float64)
